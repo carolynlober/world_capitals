@@ -1,0 +1,138 @@
+---
+title: "World Capitals"
+author: "Carolyn Lober"
+date: "2024-04-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## World Capitals
+
+First, let's load the packages we need. We'll also define a function to calculate bearing (direction) between two points
+
+```{r message = FALSE}
+library(terra)
+library(here)
+library(dplyr)
+library(ggplot2)
+
+bearing <- function(p1, p2) {
+  coords1 <- geom(p1)[,c("x","y")]
+  coords2 <- geom(p2)[,c("x","y")]
+
+  # Convert latitude and longitude from degrees to radians
+  lat1 <- coords1[2] * pi / 180
+  lat2 <- coords2[2] * pi / 180
+  lon1 <- coords1[1] * pi / 180
+  lon2 <- coords2[1] * pi / 180
+
+  # Calculate bearing
+  delta_lon <- lon2 - lon1
+  x <- sin(delta_lon) * cos(lat2)
+  y <- cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(delta_lon)
+  bearing <- atan2(x, y) * 180 / pi
+  
+  # Correcting for negative angles
+  if(bearing < 0) {
+    bearing <- 360 + bearing
+  }
+  
+  names(bearing) <- NULL
+  return(bearing)
+}
+
+```
+
+Next, we'll load our data. We have one shapefile with country borders, and one with cities. Let's see what they look like.
+
+```{r}
+countries <- terra::vect(here("ne_10m_admin_0_countries","ne_10m_admin_0_countries.shp"))
+cities <- terra::vect(here("ne_10m_populated_places","ne_10m_populated_places.shp"))
+
+print(countries %>% as_tibble)
+print(cities %>% as_tibble) 
+```
+
+There's a lot of information there! For now, lets subset to only the capital cities. Also, let's remove any countries with more than one capital city, for simplicity (sorry South Africa, Bolivia, and Ivory Coast).
+
+```{r}
+capitals <- cities[which(cities$ADM0CAP == 1)]
+
+multiple_capitals <- unique(capitals$ADM0_A3[which(duplicated(capitals$ADM0_A3))])
+capitals <- capitals[which(!capitals$ADM0_A3 %in% multiple_capitals)]
+```
+
+Looks like we only have 200 admin-0 capitals, compared to 258 country boundaries. Let's subset countries so that we're only using ones with capitals provided.
+
+```{r}
+countries <- countries[which(countries$ADM0_A3 %in% capitals$ADM0_A3)]
+```
+
+## First plots
+
+Now let's plot our data. (Note that South Africa is missing!)
+
+```{r}
+plot(countries)
+points(capitals,col="red")
+```
+
+I want to see how close to the centroid every world capital is. In order to do that we'll first need to calculate the centroid of the country, then the distance and direction from the capital to that centroid, and finally the distance from the capital to the country border. 
+
+When calculating centroids, ```inside = TRUE``` helps us constrain the centroid to being within a country (because a country wouldn't put its capital outside its borders!), even though this doesn't give us a "true" centroid. Take a look at the case of France, below, for more.
+
+```{r}
+centroids <- terra::centroids(countries, inside = TRUE)
+
+# we need to order our data so that countries and capitals are matched up
+centroids <- sort(centroids, "ADM0_A3")
+capitals <- sort(capitals, "ADM0_A3")
+countries <- sort(countries, "ADM0_A3")
+
+# check that they are sorted the same
+all(centroids$ADM0_A3 == capitals$ADM0_A3)
+
+# calculate the distance from the centroid to the capital
+capitals$dist_to_centroid <- terra::distance(centroids, capitals, pairwise = TRUE)
+
+# now, calculate the direction from the centroid to the capital
+capitals$dir_to_centroid <- sapply(1:length(capitals), \(i) bearing(centroids[i], capitals[i]))
+
+# last, calculate the (shortest) distance from the capital to country border
+capitals$dist_to_border <- sapply(1:length(capitals), function(i) {
+  border_points <- terra::as.points(terra::as.lines(countries[i]))
+  my_distance <- terra::distance(border_points, capitals[i])
+  return(min(my_distance))
+})
+
+capitals$normalized_distance <- capitals$dist_to_centroid / (capitals$dist_to_centroid + capitals$dist_to_border)
+
+```
+
+Time to plot our data! 
+
+```{r}
+capitals %>% as_tibble %>%
+  mutate(is.US = ADM0_A3 == "USA") %>%
+  ggplot(aes(x = dir_to_centroid, y = normalized_distance, col = is.US)) + 
+  coord_polar() + geom_point() + xlim(c(0,360)) + ylim(c(0,1)) + 
+  ggtitle("Relative position of world capitals")
+
+```
+
+A quick side note  Take the example of France. If we plot the country outline, we can see that it includes mainland France, as well as French Guiana and a few islands in the Caribbean. This means that the centroid calculated for France is outside of the border of France (thanks, colonialism). 
+
+```{r}
+plot(countries[which(countries$ADMIN == "France")])
+points(terra::centroids(countries[which(countries$ADMIN == "France")], TRUE), col="darkgreen")
+points(terra::centroids(countries[which(countries$ADMIN == "France")], FALSE), col="red")
+```
+
+For our purposes, we want the centroids to fall inside of the border of the main part of the country. 
+
+
+
+
