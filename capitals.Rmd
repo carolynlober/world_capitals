@@ -6,18 +6,21 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, results = "hold")
 ```
 
 ## World Capitals
 
-First, let's load the packages we need. We'll also define a function to calculate bearing (direction) between two points
+While playing geography games like [Worldle](https://worldle.teuteuf.fr/) and [Statele](https://statele.teuteuf.fr/about), I found that more often than not, when I didn't know where a capital was, the option nearest to the entity's center was correct. This inspired the question I am trying to answer here: how close are countries' capitals to their centroids? I found some data on the internet, and set about answering my question.
+
+First, let's load the packages we need. I also define a function to calculate bearing (direction) between two points.
 
 ```{r message = FALSE}
 library(terra)
 library(here)
 library(dplyr)
 library(ggplot2)
+library(DT)
 
 bearing <- function(p1, p2) {
   coords1 <- geom(p1)[,c("x","y")]
@@ -46,17 +49,18 @@ bearing <- function(p1, p2) {
 
 ```
 
-Next, we'll load our data. We have one shapefile with country borders, and one with cities. Let's see what they look like.
+Next, we'll load our data. These data are from [Natural Earth](https://www.naturalearthdata.com/). We have one shapefile with country borders, and one with cities. 
 
 ```{r}
 countries <- terra::vect(here("ne_10m_admin_0_countries","ne_10m_admin_0_countries.shp"))
 cities <- terra::vect(here("ne_10m_populated_places","ne_10m_populated_places.shp"))
 
-print(countries %>% as_tibble)
-print(cities %>% as_tibble) 
+# wow, lots of variables! let's narrow it down, so it's easier to deal with
+countries <- countries[,c("ADM0_A3", "NAME", "TYPE", "FORMAL_EN", "POP_EST", "POP_YEAR", "GDP_MD", "GDP_YEAR", "ECONOMY", "INCOME_GRP", "CONTINENT", "REGION_UN", "SUBREGION", "REGION_WB")]
+cities <- cities[,c("ADM0_A3", "NAME", "ADM0CAP", "CAPIN", "WORLDCITY", "MEGACITY", "ADM0NAME", "POP_MAX", "POP_MIN")]
 ```
 
-There's a lot of information there! For now, lets subset to only the capital cities. Also, let's remove any countries with more than one capital city, for simplicity (sorry South Africa, Bolivia, and Ivory Coast).
+There's a lot of information there! Let's subset to only the capital cities. Also, let's remove any countries with more than one capital city, for simplicity (sorry South Africa, Bolivia, and Ivory Coast). 
 
 ```{r}
 capitals <- cities[which(cities$ADM0CAP == 1)]
@@ -65,7 +69,7 @@ multiple_capitals <- unique(capitals$ADM0_A3[which(duplicated(capitals$ADM0_A3))
 capitals <- capitals[which(!capitals$ADM0_A3 %in% multiple_capitals)]
 ```
 
-Looks like we only have 200 admin-0 capitals, compared to 258 country boundaries. Let's subset countries so that we're only using ones with capitals provided.
+Looks like we only have 200 admin-0 capitals, compared to 258 country boundaries. Let's subset countries so that we're only using ones with capitals provided. 
 
 ```{r}
 countries <- countries[which(countries$ADM0_A3 %in% capitals$ADM0_A3)]
@@ -73,7 +77,7 @@ countries <- countries[which(countries$ADM0_A3 %in% capitals$ADM0_A3)]
 
 ## First plots
 
-Now let's plot our data. (Note that South Africa is missing!)
+Now let's plot our data. (Note that South Africa and Ivory Coast's borders and capitals are missing, as well as Bolivia's.)
 
 ```{r}
 plot(countries)
@@ -102,6 +106,7 @@ capitals$dist_to_centroid <- terra::distance(centroids, capitals, pairwise = TRU
 capitals$dir_to_centroid <- sapply(1:length(capitals), \(i) bearing(centroids[i], capitals[i]))
 
 # last, calculate the (shortest) distance from the capital to country border
+# unfortunately, the function for calculating the distance between a point and a polygon returns a value in degrees -- not that useful! instead, we'll convert the polygon to points, and calculate the shortest distance between 
 capitals$dist_to_border <- sapply(1:length(capitals), function(i) {
   border_points <- terra::as.points(terra::as.lines(countries[i]))
   my_distance <- terra::distance(border_points, capitals[i])
@@ -110,29 +115,85 @@ capitals$dist_to_border <- sapply(1:length(capitals), function(i) {
 
 capitals$normalized_distance <- capitals$dist_to_centroid / (capitals$dist_to_centroid + capitals$dist_to_border)
 
+# merge so that we get all the information from countries
+capitals <- merge(capitals, countries, by = "ADM0_A3")
+
 ```
 
-Time to plot our data! 
+Time to plot our data! First let's look at the relative positions of the capitals, using the ```normalized_distance```, or the relative placement of the capital between the centroid and border and the ```dir_to_centroid```, which is the bearing between the centroid and the capital. I like to think of this as plotting the position of the capital if the country's border were normalized to a circle (though I'm sure there's a more complex way to do that geometrically than what I've done here).
 
-```{r}
+```{r echo = FALSE}
 capitals %>% as_tibble %>%
-  mutate(is.US = ADM0_A3 == "USA") %>%
-  ggplot(aes(x = dir_to_centroid, y = normalized_distance, col = is.US)) + 
-  coord_polar() + geom_point() + xlim(c(0,360)) + ylim(c(0,1)) + 
-  ggtitle("Relative position of world capitals")
+  ggplot(aes(x = dir_to_centroid, y = normalized_distance, col = CONTINENT)) +
+  coord_radial(expand = FALSE) + geom_point() + 
+  scale_x_continuous(breaks = c(0,45,90,135,180,225,270,315), limits = c(0, 360), labels = c("N", "NE", "E", "SE", "S", "SW", "W", "NW")) + 
+  ggtitle("Relative position of world capitals") + theme_minimal() +
+  scale_y_continuous(breaks = c(0, 0.25, 0.5, 0.75, 1), limits = c(0, 1))
 
 ```
 
-A quick side note  Take the example of France. If we plot the country outline, we can see that it includes mainland France, as well as French Guiana and a few islands in the Caribbean. This means that the centroid calculated for France is outside of the border of France (thanks, colonialism). 
+The capitals look pretty spread out here, and it's not that easy to see patterns --- let's look at the data in a different way, with a histogram. 
+
+```{r echo = FALSE}
+capitals %>% as_tibble %>%
+  ggplot(aes(x = normalized_distance, fill = CONTINENT)) + 
+  geom_histogram(bins = 25) + 
+  theme_minimal() +
+  ylab("Number of capitals") + 
+  xlab("Relative distance from centroid")
+
+```
+
+In the histogram, it becomes clear that the majority of capitals are located near the borders of countries. This makes sense, it may be economically advantageous to have a capital with port access for trading. However, for landlocked countries, it may make more sense to have a capital farther away from your state's borders (unless, say, you have a river port). Let's see if we can figure out how many capitals that are near a border are located on coasts versus a border with another country. 
 
 ```{r}
-plot(countries[which(countries$ADMIN == "France")])
-points(terra::centroids(countries[which(countries$ADMIN == "France")], TRUE), col="darkgreen")
-points(terra::centroids(countries[which(countries$ADMIN == "France")], FALSE), col="red")
+coastline <- terra::aggregate(countries <- terra::vect(here("ne_10m_admin_0_countries","ne_10m_admin_0_countries.shp"))) %>% terra::as.lines(.)
+coastline_buffer <- terra::buffer(coastline, width = 20000) 
 ```
 
-For our purposes, we want the centroids to fall inside of the border of the main part of the country. 
+The ```width``` in the ```buffer``` function is measured in m, so 20,000 gives us a buffer of 20km around a coastline. Let's look at Washington, D.C. to see if this seems reasonable. 
 
+```{r}
+par(pty="s")
+plot(coastline_buffer, xlim = c(-80, -74), ylim=c(35,41))
+lines(coastline,col="red")
+points(capitals,pch=8)
+```
 
+Looks good to me. Let's add a variable in capitals that indicates whether a capital is on (within 20 km of) a coastline. 
 
+```{r}
+capitals$on_coastline <- terra::relate(coastline_buffer, capitals, relation = "contains") %>% as.vector
+```
 
+Now, we can repeat the same histogram, this time with a variable indicating whether the capital is on a coastline or not. 
+
+```{r echo = FALSE}
+capitals %>% as_tibble %>%
+  ggplot(aes(x = normalized_distance, fill = on_coastline)) + 
+  geom_histogram(position = "dodge", bins = 25) + 
+  theme_minimal() +
+  ylab("Number of capitals") + 
+  xlab("Relative distance from centroid")
+
+```
+
+Here, we can see that the vast majority of capitals along borders are along coastlines. Without these, the distribution of capitals is much flatter across the range of relative distances. Still, it seems like there isn't any bias towards being closer to the centroid than the countries border, so it looks like my hypothesis was wrong! 
+
+------------------
+A few quick examples regarding the impact of the ```inside = TRUE``` parameter: Take the example of France. If we plot the country outline, we can see that it includes mainland France, French Guiana and a few other islands throughout the world. This means that the centroid calculated for France is outside of the border of France. 
+
+```{r}
+plot(countries[which(countries$NAME == "France")])
+points(terra::centroids(countries[which(countries$NAME == "France")], TRUE), col="darkgreen", cex = 1.5, alpha = 0.6)
+points(terra::centroids(countries[which(countries$NAME == "France")], FALSE), col="red", cex = 1.5, alpha = 0.6)
+```
+
+For our purposes, we want the centroids to fall inside of the border of the country, as locating a capital in the middle of the ocean or the boundaries of another country is clearly not a valid answer. In the case of France, this luckly gives us a point within the borders of mainland France. However, it is not clear from the documentation how the particular polygon that the centroid is constrained in is chosen and this may result in some wonky centroids for island nations such as the Seychelles, shown below. The red dot shows the true centroid, the green dot shows the constrained centroid, and the blue dot shows the actual location of the capital city.  
+
+```{r}
+plot(countries[which(countries$NAME == "Seychelles")])
+points(terra::centroids(countries[which(countries$NAME == "Seychelles")], TRUE), col="darkgreen", cex = 1.5, alpha = 0.6)
+points(terra::centroids(countries[which(countries$NAME == "Seychelles")], FALSE), col="red", cex = 1.5, alpha = 0.6)
+points(capitals[which(capitals$ADM0NAME == "Seychelles")], col = "blue", cex = 1.5, alpha = 0.6)
+```
