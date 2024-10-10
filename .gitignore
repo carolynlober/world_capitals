@@ -47,3 +47,7 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# data files
+ne_10m_admin_0_countries/
+ne_10m_populated_places/
